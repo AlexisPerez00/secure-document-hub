@@ -1,4 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import { Button } from "@/components/ui/button";
@@ -20,85 +23,164 @@ import {
   Mail,
   Upload,
   Eye,
+  Loader2,
+  RefreshCw,
 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 interface Document {
   id: string;
-  name: string;
-  originalType: string;
-  source: "email" | "manual";
-  size: string;
-  status: "pending" | "processing" | "completed" | "error";
-  createdAt: string;
+  original_filename: string;
+  converted_filename: string | null;
+  file_type: string;
+  source: string;
+  file_size: number;
+  status: string;
+  created_at: string;
+  storage_path: string | null;
+  converted_storage_path: string | null;
 }
 
-// Mock data for demonstration
-const mockDocuments: Document[] = [
-  {
-    id: "1",
-    name: "Factura_2024_001.pdf",
-    originalType: "PDF",
-    source: "email",
-    size: "2.4 MB",
-    status: "completed",
-    createdAt: "2024-01-08 10:30",
-  },
-  {
-    id: "2",
-    name: "Contrato_Servicio.docx",
-    originalType: "Word",
-    source: "manual",
-    size: "1.8 MB",
-    status: "completed",
-    createdAt: "2024-01-08 09:15",
-  },
-  {
-    id: "3",
-    name: "Inventario_Q4.xlsx",
-    originalType: "Excel",
-    source: "email",
-    size: "4.2 MB",
-    status: "processing",
-    createdAt: "2024-01-08 08:45",
-  },
-  {
-    id: "4",
-    name: "Comprobante_Pago.png",
-    originalType: "Imagen",
-    source: "email",
-    size: "3.1 MB",
-    status: "pending",
-    createdAt: "2024-01-07 16:20",
-  },
-];
-
 const Inbox = () => {
+  const navigate = useNavigate();
+  const { user, loading: authLoading } = useAuth();
+  const { toast } = useToast();
+  
   const [searchTerm, setSearchTerm] = useState("");
-  const [documents] = useState<Document[]>(mockDocuments);
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!authLoading && !user) {
+      navigate('/auth');
+    }
+  }, [user, authLoading, navigate]);
+
+  useEffect(() => {
+    if (user) {
+      fetchDocuments();
+    }
+  }, [user]);
+
+  const fetchDocuments = async () => {
+    if (!user) return;
+    
+    setLoading(true);
+    const { data, error } = await supabase
+      .from('documents')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      toast({
+        title: 'Error',
+        description: 'No se pudieron cargar los documentos',
+        variant: 'destructive'
+      });
+    } else {
+      setDocuments(data || []);
+    }
+    setLoading(false);
+  };
+
+  const deleteDocument = async (id: string, storagePath: string | null) => {
+    // Delete from storage first if exists
+    if (storagePath) {
+      await supabase.storage.from('documents').remove([storagePath]);
+    }
+    
+    const { error } = await supabase
+      .from('documents')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      toast({
+        title: 'Error',
+        description: 'No se pudo eliminar el documento',
+        variant: 'destructive'
+      });
+    } else {
+      toast({
+        title: 'Eliminado',
+        description: 'El documento ha sido eliminado'
+      });
+      fetchDocuments();
+    }
+  };
+
+  const downloadDocument = async (storagePath: string | null, filename: string) => {
+    if (!storagePath) return;
+    
+    const { data, error } = await supabase.storage
+      .from('documents')
+      .download(storagePath);
+
+    if (error) {
+      toast({
+        title: 'Error',
+        description: 'No se pudo descargar el documento',
+        variant: 'destructive'
+      });
+      return;
+    }
+
+    const url = URL.createObjectURL(data);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const filteredDocuments = documents.filter((doc) =>
-    doc.name.toLowerCase().includes(searchTerm.toLowerCase())
+    doc.original_filename.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  const getStatusBadge = (status: Document["status"]) => {
-    const variants: Record<Document["status"], { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
+  const getStatusBadge = (status: string) => {
+    const variants: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
       pending: { label: "Pendiente", variant: "outline" },
       processing: { label: "Procesando", variant: "secondary" },
       completed: { label: "Completado", variant: "default" },
       error: { label: "Error", variant: "destructive" },
     };
     
-    const { label, variant } = variants[status];
+    const { label, variant } = variants[status] || { label: status, variant: "outline" as const };
     return <Badge variant={variant}>{label}</Badge>;
   };
 
-  const getSourceIcon = (source: Document["source"]) => {
+  const getSourceIcon = (source: string) => {
     return source === "email" ? (
       <Mail className="h-4 w-4 text-muted-foreground" />
     ) : (
       <Upload className="h-4 w-4 text-muted-foreground" />
     );
   };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const getFileTypeLabel = (type: string) => {
+    const labels: Record<string, string> = {
+      pdf: "PDF",
+      word: "Word",
+      excel: "Excel",
+      image: "Imagen",
+    };
+    return labels[type] || type;
+  };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
@@ -126,6 +208,10 @@ const Inbox = () => {
                 className="pl-10"
               />
             </div>
+            <Button variant="outline" onClick={fetchDocuments} disabled={loading}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+              Actualizar
+            </Button>
           </div>
 
           {/* Documents Table */}
@@ -144,7 +230,13 @@ const Inbox = () => {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredDocuments.length === 0 ? (
+                {loading ? (
+                  <TableRow>
+                    <TableCell colSpan={8} className="text-center py-12">
+                      <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mx-auto" />
+                    </TableCell>
+                  </TableRow>
+                ) : filteredDocuments.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={8} className="text-center py-12">
                       <FileText className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
@@ -159,8 +251,10 @@ const Inbox = () => {
                       <TableCell>
                         <FileText className="h-5 w-5 text-primary" />
                       </TableCell>
-                      <TableCell className="font-medium">{doc.name}</TableCell>
-                      <TableCell>{doc.originalType}</TableCell>
+                      <TableCell className="font-medium">
+                        {doc.converted_filename || doc.original_filename}
+                      </TableCell>
+                      <TableCell>{getFileTypeLabel(doc.file_type)}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
                           {getSourceIcon(doc.source)}
@@ -169,21 +263,30 @@ const Inbox = () => {
                           </span>
                         </div>
                       </TableCell>
-                      <TableCell>{doc.size}</TableCell>
+                      <TableCell>{formatFileSize(doc.file_size)}</TableCell>
                       <TableCell>{getStatusBadge(doc.status)}</TableCell>
                       <TableCell className="text-muted-foreground">
-                        {doc.createdAt}
+                        {new Date(doc.created_at).toLocaleString('es-MX')}
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-2">
-                          <Button variant="ghost" size="icon" title="Ver">
+                          <Button 
+                            variant="ghost" 
+                            size="icon" 
+                            title="Ver"
+                            disabled={!doc.storage_path}
+                          >
                             <Eye className="h-4 w-4" />
                           </Button>
                           <Button
                             variant="ghost"
                             size="icon"
                             title="Descargar"
-                            disabled={doc.status !== "completed"}
+                            disabled={doc.status !== "completed" || !doc.converted_storage_path}
+                            onClick={() => downloadDocument(
+                              doc.converted_storage_path || doc.storage_path, 
+                              doc.converted_filename || doc.original_filename
+                            )}
                           >
                             <Download className="h-4 w-4" />
                           </Button>
@@ -192,6 +295,7 @@ const Inbox = () => {
                             size="icon"
                             title="Eliminar"
                             className="text-destructive hover:text-destructive"
+                            onClick={() => deleteDocument(doc.id, doc.storage_path)}
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
