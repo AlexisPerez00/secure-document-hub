@@ -1,15 +1,21 @@
 import { useState, useCallback } from "react";
-import { Upload, FileUp, X, File, FileImage, FileSpreadsheet, FileText as FileTextIcon } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Upload, FileUp, X, File, FileImage, FileSpreadsheet, FileText as FileTextIcon, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
 
 interface UploadedFile {
   id: string;
   file: File;
-  status: "pending" | "processing" | "completed" | "error";
+  status: "pending" | "uploading" | "processing" | "completed" | "error";
+  documentId?: string;
 }
 
 const FileUploadZone = () => {
+  const navigate = useNavigate();
+  const { user } = useAuth();
   const [isDragging, setIsDragging] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -31,6 +37,14 @@ const FileUploadZone = () => {
     if (type.includes("sheet") || type.includes("excel")) return FileSpreadsheet;
     if (type.includes("pdf")) return FileTextIcon;
     return File;
+  };
+
+  const getFileType = (mimeType: string): string => {
+    if (mimeType === "application/pdf") return "pdf";
+    if (mimeType.includes("word")) return "word";
+    if (mimeType.includes("excel") || mimeType.includes("spreadsheet")) return "excel";
+    if (mimeType.startsWith("image/")) return "image";
+    return "other";
   };
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -91,6 +105,12 @@ const FileUploadZone = () => {
   };
 
   const handleDigitalize = async () => {
+    if (!user) {
+      toast.error("Debes iniciar sesión para digitalizar documentos");
+      navigate('/auth');
+      return;
+    }
+
     if (uploadedFiles.length === 0) {
       toast.error("Por favor, selecciona al menos un archivo");
       return;
@@ -98,18 +118,84 @@ const FileUploadZone = () => {
 
     setIsProcessing(true);
     
-    // Simulate processing - in real app, this would call the backend
-    setUploadedFiles((prev) =>
-      prev.map((f) => ({ ...f, status: "processing" as const }))
-    );
+    for (const uploadedFile of uploadedFiles) {
+      try {
+        // Update status to uploading
+        setUploadedFiles((prev) =>
+          prev.map((f) => f.id === uploadedFile.id ? { ...f, status: "uploading" as const } : f)
+        );
 
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+        // Create document record
+        const { data: doc, error: docError } = await supabase
+          .from('documents')
+          .insert({
+            user_id: user.id,
+            original_filename: uploadedFile.file.name,
+            file_type: getFileType(uploadedFile.file.type),
+            file_size: uploadedFile.file.size,
+            status: 'pending',
+            source: 'manual'
+          })
+          .select()
+          .single();
 
-    setUploadedFiles((prev) =>
-      prev.map((f) => ({ ...f, status: "completed" as const }))
-    );
+        if (docError) throw docError;
 
-    toast.success("¡Documentos procesados exitosamente!");
+        // Upload file to storage
+        const storagePath = `${user.id}/original/${doc.id}/${uploadedFile.file.name}`;
+        const { error: uploadError } = await supabase.storage
+          .from('documents')
+          .upload(storagePath, uploadedFile.file);
+
+        if (uploadError) throw uploadError;
+
+        // Update document with storage path
+        await supabase
+          .from('documents')
+          .update({ storage_path: storagePath })
+          .eq('id', doc.id);
+
+        // Update status to processing
+        setUploadedFiles((prev) =>
+          prev.map((f) => f.id === uploadedFile.id ? { ...f, status: "processing" as const, documentId: doc.id } : f)
+        );
+
+        // Call conversion function
+        const { error: convertError } = await supabase.functions.invoke('convert-document', {
+          body: { documentId: doc.id }
+        });
+
+        if (convertError) {
+          console.error('Conversion error:', convertError);
+          // Update document status to error
+          await supabase
+            .from('documents')
+            .update({ status: 'error', error_message: convertError.message })
+            .eq('id', doc.id);
+          
+          setUploadedFiles((prev) =>
+            prev.map((f) => f.id === uploadedFile.id ? { ...f, status: "error" as const } : f)
+          );
+        } else {
+          // Update status to completed
+          setUploadedFiles((prev) =>
+            prev.map((f) => f.id === uploadedFile.id ? { ...f, status: "completed" as const } : f)
+          );
+        }
+
+      } catch (error) {
+        console.error('Upload error:', error);
+        setUploadedFiles((prev) =>
+          prev.map((f) => f.id === uploadedFile.id ? { ...f, status: "error" as const } : f)
+        );
+        toast.error(`Error al procesar: ${uploadedFile.file.name}`);
+      }
+    }
+
+    const completedCount = uploadedFiles.filter(f => f.status !== "error").length;
+    if (completedCount > 0) {
+      toast.success(`¡${completedCount} documento(s) procesado(s) exitosamente!`);
+    }
     setIsProcessing(false);
   };
 
@@ -185,12 +271,16 @@ const FileUploadZone = () => {
                     </p>
                   </div>
                   
-                  {uploadedFile.status === "processing" && (
-                    <div className="h-4 w-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                  {(uploadedFile.status === "uploading" || uploadedFile.status === "processing") && (
+                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
                   )}
                   
                   {uploadedFile.status === "completed" && (
                     <span className="text-xs text-primary font-medium">✓ Listo</span>
+                  )}
+                  
+                  {uploadedFile.status === "error" && (
+                    <span className="text-xs text-destructive font-medium">✕ Error</span>
                   )}
                   
                   {uploadedFile.status === "pending" && (
@@ -216,10 +306,28 @@ const FileUploadZone = () => {
           disabled={uploadedFiles.length === 0 || isProcessing}
           className="px-12 py-6 text-lg font-semibold"
         >
-          <FileUp className="mr-2 h-5 w-5" />
-          {isProcessing ? "Procesando..." : "Digitalizar"}
+          {isProcessing ? (
+            <>
+              <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+              Procesando...
+            </>
+          ) : (
+            <>
+              <FileUp className="mr-2 h-5 w-5" />
+              Digitalizar
+            </>
+          )}
         </Button>
       </div>
+
+      {!user && (
+        <p className="text-center text-sm text-muted-foreground mt-4">
+          <button onClick={() => navigate('/auth')} className="text-primary hover:underline">
+            Inicia sesión
+          </button>
+          {" "}para guardar tus documentos
+        </p>
+      )}
     </div>
   );
 };
