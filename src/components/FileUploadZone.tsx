@@ -1,10 +1,18 @@
 import { useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, FileUp, X, File, FileImage, FileSpreadsheet, FileText as FileTextIcon, Loader2 } from "lucide-react";
+import {
+  Upload,
+  FileUp,
+  X,
+  File,
+  FileImage,
+  FileSpreadsheet,
+  FileText as FileTextIcon,
+  Loader2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
-import { supabase } from "@/integrations/supabase/client";
 
 interface UploadedFile {
   id: string;
@@ -34,7 +42,8 @@ const FileUploadZone = () => {
 
   const getFileIcon = (type: string) => {
     if (type.includes("image")) return FileImage;
-    if (type.includes("sheet") || type.includes("excel")) return FileSpreadsheet;
+    if (type.includes("sheet") || type.includes("excel"))
+      return FileSpreadsheet;
     if (type.includes("pdf")) return FileTextIcon;
     return File;
   };
@@ -42,9 +51,67 @@ const FileUploadZone = () => {
   const getFileType = (mimeType: string): string => {
     if (mimeType === "application/pdf") return "pdf";
     if (mimeType.includes("word")) return "word";
-    if (mimeType.includes("excel") || mimeType.includes("spreadsheet")) return "excel";
+    if (mimeType.includes("excel") || mimeType.includes("spreadsheet"))
+      return "excel";
     if (mimeType.startsWith("image/")) return "image";
     return "other";
+  };
+
+  const uploadFileToServer = async (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`Fallo al subir: ${file.name}. ${errText}`);
+    }
+
+    const data = await res.json();
+    return data as {
+      message: string;
+      filename: string;
+      originalName: string;
+      size: number;
+    };
+  };
+
+  // Crear el documento en MongoDB (backend propio)
+  const createDocumentRecord = async (payload: {
+    originalName: string;
+    mimeType: string;
+    size: number;
+    source: "manual";
+  }) => {
+    const res = await fetch("/api/documents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => "");
+      throw new Error(`Fallo al crear documento: ${err}`);
+    }
+    return (await res.json()) as { id: string };
+  };
+
+  // Solicitar conversión VUCEM (backend propio)
+  // Puedes no implementar esto hoy y dejar el documento en "pending"
+  const requestVucemConversion = async (documentId: string) => {
+    const res = await fetch(`/api/convert`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ documentId }),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => "");
+      throw new Error(`Fallo al encolar conversión: ${err}`);
+    }
+    return await res.json();
   };
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -71,7 +138,7 @@ const FileUploadZone = () => {
 
   const addFiles = (files: FileList | null) => {
     if (!files) return;
-    
+
     const newFiles: UploadedFile[] = [];
     Array.from(files).forEach((file) => {
       if (validateFile(file)) {
@@ -82,7 +149,7 @@ const FileUploadZone = () => {
         });
       }
     });
-    
+
     if (newFiles.length > 0) {
       setUploadedFiles((prev) => [...prev, ...newFiles]);
       toast.success(`${newFiles.length} archivo(s) agregado(s)`);
@@ -107,7 +174,7 @@ const FileUploadZone = () => {
   const handleDigitalize = async () => {
     if (!user) {
       toast.error("Debes iniciar sesión para digitalizar documentos");
-      navigate('/auth');
+      navigate("/auth");
       return;
     }
 
@@ -117,84 +184,82 @@ const FileUploadZone = () => {
     }
 
     setIsProcessing(true);
-    
+
     for (const uploadedFile of uploadedFiles) {
       try {
         // Update status to uploading
         setUploadedFiles((prev) =>
-          prev.map((f) => f.id === uploadedFile.id ? { ...f, status: "uploading" as const } : f)
+          prev.map((f) =>
+            f.id === uploadedFile.id
+              ? { ...f, status: "uploading" as const }
+              : f
+          )
         );
 
-        // Create document record
-        const { data: doc, error: docError } = await supabase
-          .from('documents')
-          .insert({
-            user_id: user.id,
-            original_filename: uploadedFile.file.name,
-            file_type: getFileType(uploadedFile.file.type),
-            file_size: uploadedFile.file.size,
-            status: 'pending',
-            source: 'manual'
-          })
-          .select()
-          .single();
-
-        if (docError) throw docError;
-
-        // Upload file to storage
-        const storagePath = `${user.id}/original/${doc.id}/${uploadedFile.file.name}`;
-        const { error: uploadError } = await supabase.storage
-          .from('documents')
-          .upload(storagePath, uploadedFile.file);
-
-        if (uploadError) throw uploadError;
-
-        // Update document with storage path
-        await supabase
-          .from('documents')
-          .update({ storage_path: storagePath })
-          .eq('id', doc.id);
-
-        // Update status to processing
-        setUploadedFiles((prev) =>
-          prev.map((f) => f.id === uploadedFile.id ? { ...f, status: "processing" as const, documentId: doc.id } : f)
-        );
-
-        // Call conversion function
-        const { error: convertError } = await supabase.functions.invoke('convert-document', {
-          body: { documentId: doc.id }
+        // 1) Crear documento en tu backend (MongoDB)
+        const doc = await createDocumentRecord({
+          originalName: uploadedFile.file.name,
+          mimeType: uploadedFile.file.type,
+          size: uploadedFile.file.size,
+          source: "manual",
         });
 
-        if (convertError) {
-          console.error('Conversion error:', convertError);
-          // Update document status to error
-          await supabase
-            .from('documents')
-            .update({ status: 'error', error_message: convertError.message })
-            .eq('id', doc.id);
-          
-          setUploadedFiles((prev) =>
-            prev.map((f) => f.id === uploadedFile.id ? { ...f, status: "error" as const } : f)
-          );
-        } else {
-          // Update status to completed
-          setUploadedFiles((prev) =>
-            prev.map((f) => f.id === uploadedFile.id ? { ...f, status: "completed" as const } : f)
-          );
-        }
+        // 2) Subir archivo al backend (tu endpoint ya existe: /api/upload)
+        const uploadResp = await uploadFileToServer(uploadedFile.file);
+        // Opcional: tu backend puede devolver storagePath, hash, etc.
 
-      } catch (error) {
-        console.error('Upload error:', error);
+        // 3) Marcar estado local como "processing"
         setUploadedFiles((prev) =>
-          prev.map((f) => f.id === uploadedFile.id ? { ...f, status: "error" as const } : f)
+          prev.map((f) =>
+            f.id === uploadedFile.id
+              ? { ...f, status: "processing" as const, documentId: doc.id }
+              : f
+          )
+        );
+
+        // 4) Encolar conversión VUCEM (o dejar pendiente para siguiente fase)
+        try {
+          await requestVucemConversion(doc.id);
+
+          // Si la API responde OK, marcar completed
+          setUploadedFiles((prev) =>
+            prev.map((f) =>
+              f.id === uploadedFile.id
+                ? { ...f, status: "completed" as const }
+                : f
+            )
+          );
+        } catch (convertErr: unknown) {
+          const msg =
+            convertErr instanceof Error
+              ? convertErr.message
+              : "Error desconocido";
+          console.error("Conversion error:", convertErr);
+          setUploadedFiles((prev) =>
+            prev.map((f) =>
+              f.id === uploadedFile.id ? { ...f, status: "error" as const } : f
+            )
+          );
+          toast.error(`Error al convertir: ${uploadedFile.file.name} - ${msg}`);
+        }
+      } catch (error) {
+        console.error("Upload error:", error);
+        setUploadedFiles((prev) =>
+          prev.map((f) =>
+            f.id === uploadedFile.id ? { ...f, status: "error" as const } : f
+          )
         );
         toast.error(`Error al procesar: ${uploadedFile.file.name}`);
       }
     }
 
-    const completedCount = uploadedFiles.filter(f => f.status !== "error").length;
+    const completedCount = uploadedFiles.filter(
+      (f) => f.status !== "error"
+    ).length;
     if (completedCount > 0) {
-      toast.success(`¡${completedCount} documento(s) procesado(s) exitosamente!`);
+      toast.success(
+        `¡${completedCount} documento(s) procesado(s) exitosamente!`
+      );
     }
     setIsProcessing(false);
   };
@@ -225,16 +290,20 @@ const FileUploadZone = () => {
           onChange={handleFileInput}
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
         />
-        
+
         <div className="flex flex-col items-center justify-center gap-4 pointer-events-none">
-          <div className={`p-4 rounded-full transition-colors ${
-            isDragging ? "bg-primary/20" : "bg-muted"
-          }`}>
-            <Upload className={`h-12 w-12 transition-colors ${
-              isDragging ? "text-primary" : "text-muted-foreground"
-            }`} />
+          <div
+            className={`p-4 rounded-full transition-colors ${
+              isDragging ? "bg-primary/20" : "bg-muted"
+            }`}
+          >
+            <Upload
+              className={`h-12 w-12 transition-colors ${
+                isDragging ? "text-primary" : "text-muted-foreground"
+              }`}
+            />
           </div>
-          
+
           <div className="text-center">
             <p className="text-lg font-medium text-foreground">
               Elija un archivo PDF, Word, Excel o imagen
@@ -252,7 +321,7 @@ const FileUploadZone = () => {
           <h3 className="text-sm font-medium text-foreground">
             Archivos seleccionados ({uploadedFiles.length})
           </h3>
-          
+
           <div className="space-y-2">
             {uploadedFiles.map((uploadedFile) => {
               const Icon = getFileIcon(uploadedFile.file.type);
@@ -270,19 +339,24 @@ const FileUploadZone = () => {
                       {formatFileSize(uploadedFile.file.size)}
                     </p>
                   </div>
-                  
-                  {(uploadedFile.status === "uploading" || uploadedFile.status === "processing") && (
+
+                  {(uploadedFile.status === "uploading" ||
+                    uploadedFile.status === "processing") && (
                     <Loader2 className="h-4 w-4 animate-spin text-primary" />
                   )}
-                  
+
                   {uploadedFile.status === "completed" && (
-                    <span className="text-xs text-primary font-medium">✓ Listo</span>
+                    <span className="text-xs text-primary font-medium">
+                      ✓ Listo
+                    </span>
                   )}
-                  
+
                   {uploadedFile.status === "error" && (
-                    <span className="text-xs text-destructive font-medium">✕ Error</span>
+                    <span className="text-xs text-destructive font-medium">
+                      ✕ Error
+                    </span>
                   )}
-                  
+
                   {uploadedFile.status === "pending" && (
                     <button
                       onClick={() => removeFile(uploadedFile.id)}
@@ -322,10 +396,13 @@ const FileUploadZone = () => {
 
       {!user && (
         <p className="text-center text-sm text-muted-foreground mt-4">
-          <button onClick={() => navigate('/auth')} className="text-primary hover:underline">
+          <button
+            onClick={() => navigate("/auth")}
+            className="text-primary hover:underline"
+          >
             Inicia sesión
-          </button>
-          {" "}para guardar tus documentos
+          </button>{" "}
+          para guardar tus documentos
         </p>
       )}
     </div>

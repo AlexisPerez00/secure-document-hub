@@ -1,0 +1,12 @@
+services:
+  mongo:
+    image: mongo:6
+    container_name: secure-doc-hub-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./mongo_data:/data/db
+    environment: # ← Debe ser un MAPA (clave: valor)
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+    restart: unless-stopped
