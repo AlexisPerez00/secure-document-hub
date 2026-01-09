@@ -61,23 +61,17 @@ const FileUploadZone = () => {
     const formData = new FormData();
     formData.append("file", file);
 
-    const res = await fetch("/api/upload", {
+    // Usamos la URL completa del backend para evitar fallos de proxy
+    const res = await fetch("http://localhost:3001/api/upload", {
       method: "POST",
       body: formData,
     });
 
     if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw new Error(`Fallo al subir: ${file.name}. ${errText}`);
+      throw new Error(`Fallo al subir: ${file.name}`);
     }
 
-    const data = await res.json();
-    return data as {
-      message: string;
-      filename: string;
-      originalName: string;
-      size: number;
-    };
+    return await res.json();
   };
 
   // Crear el documento en MongoDB (backend propio)
@@ -187,81 +181,36 @@ const FileUploadZone = () => {
 
     for (const uploadedFile of uploadedFiles) {
       try {
-        // Update status to uploading
+        // Marcamos como "subiendo"
         setUploadedFiles((prev) =>
           prev.map((f) =>
-            f.id === uploadedFile.id
-              ? { ...f, status: "uploading" as const }
-              : f
+            f.id === uploadedFile.id ? { ...f, status: "uploading" } : f
           )
         );
 
-        // 1) Crear documento en tu backend (MongoDB)
-        const doc = await createDocumentRecord({
-          originalName: uploadedFile.file.name,
-          mimeType: uploadedFile.file.type,
-          size: uploadedFile.file.size,
-          source: "manual",
-        });
-
-        // 2) Subir archivo al backend (tu endpoint ya existe: /api/upload)
+        // --- UN SOLO PASO: SUBIDA Y REGISTRO ---
+        // Llamamos directamente a la subida. Nuestro backend se encarga del resto.
         const uploadResp = await uploadFileToServer(uploadedFile.file);
-        // Opcional: tu backend puede devolver storagePath, hash, etc.
 
-        // 3) Marcar estado local como "processing"
+        // Si llegó aquí, el backend ya lo guardó en Mongo y generó el PDF VUCEM
         setUploadedFiles((prev) =>
           prev.map((f) =>
-            f.id === uploadedFile.id
-              ? { ...f, status: "processing" as const, documentId: doc.id }
-              : f
+            f.id === uploadedFile.id ? { ...f, status: "completed" } : f
           )
         );
-
-        // 4) Encolar conversión VUCEM (o dejar pendiente para siguiente fase)
-        try {
-          await requestVucemConversion(doc.id);
-
-          // Si la API responde OK, marcar completed
-          setUploadedFiles((prev) =>
-            prev.map((f) =>
-              f.id === uploadedFile.id
-                ? { ...f, status: "completed" as const }
-                : f
-            )
-          );
-        } catch (convertErr: unknown) {
-          const msg =
-            convertErr instanceof Error
-              ? convertErr.message
-              : "Error desconocido";
-          console.error("Conversion error:", convertErr);
-          setUploadedFiles((prev) =>
-            prev.map((f) =>
-              f.id === uploadedFile.id ? { ...f, status: "error" as const } : f
-            )
-          );
-          toast.error(`Error al convertir: ${uploadedFile.file.name} - ${msg}`);
-        }
       } catch (error) {
-        console.error("Upload error:", error);
+        console.error("Error crítico:", error);
         setUploadedFiles((prev) =>
           prev.map((f) =>
-            f.id === uploadedFile.id ? { ...f, status: "error" as const } : f
+            f.id === uploadedFile.id ? { ...f, status: "error" } : f
           )
         );
         toast.error(`Error al procesar: ${uploadedFile.file.name}`);
       }
     }
 
-    const completedCount = uploadedFiles.filter(
-      (f) => f.status !== "error"
-    ).length;
-    if (completedCount > 0) {
-      toast.success(
-        `¡${completedCount} documento(s) procesado(s) exitosamente!`
-      );
-    }
     setIsProcessing(false);
+    toast.success("Proceso finalizado");
   };
 
   const formatFileSize = (bytes: number) => {

@@ -11,16 +11,21 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "cloudmersive-convert-api-client": "^2.8.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
-    "multer": "^2.0.2"
+    "mongoose": "^9.1.2",
+    "multer": "^2.0.2",
+    "pdf-lib": "^1.17.1",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/multer": "^2.0.0",
     "@types/node": "^25.0.3",
+    "@types/sharp": "^0.31.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
