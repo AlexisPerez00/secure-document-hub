@@ -5,17 +5,25 @@ import path from "path";
 import fs from "fs";
 import type { Request, Response } from "express";
 import "dotenv/config";
+import dotenv from "dotenv";
 import mongoose from "mongoose";
 import Document from "./models/Document";
-import { processImageForVucem } from "./services/vucemProcessor";
+import { VucemProcessor } from "./services/vucemProcessor";
+import { EmailService } from "./services/emailService";
 
+dotenv.config();
 // Sustituye esta URL por la de tu base de datos local o de Atlas después
-const MONGO_URI =
-  process.env.MONGO_URI || "mongodb://localhost:27017/secure_hub";
-
+// --- CONEXIÓN A MONGODB ---
 mongoose
-  .connect(MONGO_URI)
-  .then(() => console.log("✅ Conectado a MongoDB"))
+  .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/secure_hub")
+  .then(() => {
+    console.log("✅ Conectado a MongoDB");
+
+    // --- ARRANCAR EL BUZÓN DE EMAIL ---
+    // Solo lo iniciamos después de confirmar que la DB funciona
+    const emailService = new EmailService();
+    emailService.start();
+  })
   .catch((err) => console.error("❌ Error de conexión a MongoDB:", err));
 
 const app = express();
@@ -93,6 +101,9 @@ app.post("/api/documents", async (req: Request, res: Response) => {
 // ─────────────────────────────────────────────
 // 2. RUTA PARA SUBIDA DE ARCHIVOS (POST /api/upload)
 // Asegúrate de que esta ruta coincida con lo que el frontend envía
+// ─────────────────────────────────────────────
+// RUTA ACTUALIZADA EN index.ts
+// ─────────────────────────────────────────────
 app.post(
   "/api/upload",
   upload.single("file"),
@@ -100,8 +111,7 @@ app.post(
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-      // Aquí buscamos el documento si el frontend envió un ID,
-      // o creamos uno nuevo si no lo hizo.
+      // 1. Guardamos el registro en MongoDB
       const newDoc = new Document({
         filename: req.file.filename,
         originalName: req.file.originalname,
@@ -110,28 +120,42 @@ app.post(
         size: req.file.size,
         status: "Recibido",
       });
-
       await newDoc.save();
 
-      // DISPARAR PROCESAMIENTO VUCEM SI ES IMAGEN
-      // ... dentro de app.post("/api/upload")
-      if (req.file.mimetype.startsWith("image/")) {
-        try {
-          // Es vital el AWAIT aquí
-          const vucemPath = await processImageForVucem(req.file.path);
-          newDoc.status = "VUCEM_Listo";
-          await newDoc.save();
-        } catch (procError) {
-          console.error("Fallo el proceso VUCEM:", procError);
-          // No detenemos la respuesta, pero marcamos el error en la BD
-          newDoc.status = "Error";
-          await newDoc.save();
-        }
+      // 2. PROCESAMIENTO UNIVERSAL (Quitamos el 'if' de imagen)
+      console.log(
+        `🚀 Recibido: ${req.file.originalname} | Tipo: ${req.file.mimetype}`
+      );
+
+      try {
+        // Llamamos al procesador para CUALQUIER tipo de archivo
+        const vucemPath = await VucemProcessor.process(
+          req.file.path,
+          req.file.mimetype
+        );
+
+        newDoc.status = "VUCEM_Listo";
+        // Si es imagen, marcamos los 300 DPI
+        if (req.file.mimetype.startsWith("image/")) newDoc.dpi = 300;
+
+        await newDoc.save();
+        console.log(`✅ Procesado con éxito: ${vucemPath}`);
+        // LIMPIEZA: Borramos el original después de procesar con éxito
+        await VucemProcessor.cleanupOriginal(req.file.path);
+      } catch (procError) {
+        // Si algo falla (ej. la API de Cloudmersive), lo registramos
+        console.error(
+          "❌ Fallo el proceso VUCEM para este archivo:",
+          procError
+        );
+        newDoc.status = "Error";
+        await newDoc.save();
       }
 
-      res.json({ message: "Éxito", data: newDoc });
+      res.json({ message: "Archivo recibido", data: newDoc });
     } catch (error) {
-      res.status(500).json({ error: "Error en servidor" });
+      console.error("Error en servidor:", error);
+      res.status(500).json({ error: "Error interno" });
     }
   }
 );
