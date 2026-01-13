@@ -9,7 +9,7 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { DocumentModel } from "./models/Document";
 import { VucemProcessor } from "./services/vucemProcessor";
-import { EmailService } from "./services/emailService";
+// import { EmailService } from "./services/emailService";
 
 dotenv.config();
 // Sustituye esta URL por la de tu base de datos local o de Atlas después
@@ -21,8 +21,8 @@ mongoose
 
     // --- ARRANCAR EL BUZÓN DE EMAIL ---
     // Solo lo iniciamos después de confirmar que la DB funciona
-    const emailService = new EmailService();
-    emailService.start();
+    // const emailService = new EmailService();
+    // emailService.start();
   })
   .catch((err) => console.error("❌ Error de conexión a MongoDB:", err));
 
@@ -31,6 +31,7 @@ const PORT = Number(process.env.PORT ?? 3001);
 
 app.use(cors());
 app.use(express.json());
+app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
 // RUTA DE SALUD
 app.get("/api/health", (_req: Request, res: Response) => {
@@ -129,6 +130,42 @@ app.post(
     }
   }
 );
+
+// RUTA PARA ELIMINAR DOCUMENTO
+app.delete("/api/documents/:id", async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    // 1. Buscar el documento en BD para saber el nombre del archivo
+    const doc = await DocumentModel.findById(id);
+    if (!doc) {
+      return res.status(404).json({ error: "Documento no encontrado" });
+    }
+
+    // 2. Eliminar el archivo físico de la carpeta vucem_ready
+    const filePath = path.join(
+      __dirname,
+      "../uploads/vucem_ready",
+      doc.storedName
+    );
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+        console.log(`🗑️ Archivo físico eliminado: ${doc.storedName}`);
+      } catch (err) {
+        console.error("Error borrando archivo físico:", err);
+      }
+    }
+
+    // 3. Eliminar el registro de MongoDB
+    await DocumentModel.findByIdAndDelete(id);
+
+    res.json({ message: "Documento eliminado correctamente" });
+  } catch (error) {
+    console.error("Error al eliminar:", error);
+    res.status(500).json({ error: "Error interno al eliminar" });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`✅ Backend running on http://localhost:${PORT}`);

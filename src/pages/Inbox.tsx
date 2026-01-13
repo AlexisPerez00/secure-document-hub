@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
-import { supabase } from "@/integrations/supabase/client";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import { Button } from "@/components/ui/button";
@@ -22,139 +21,151 @@ import {
   FileText,
   Mail,
   Upload,
-  Eye,
   Loader2,
   RefreshCw,
+  FileSpreadsheet,
+  FileImage,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 interface Document {
-  id: string;
-  original_filename: string;
-  converted_filename: string | null;
-  file_type: string;
+  _id: string;
+  originalName: string;
+  storedName: string;
+  mimetype: string;
   source: string;
-  file_size: number;
-  status: string;
-  created_at: string;
-  storage_path: string | null;
-  converted_storage_path: string | null;
+  size: number;
+  status: "pending" | "completed" | "error";
+  createdAt: string;
+  downloadUrl: string;
 }
+
+const API_URL = "http://localhost:3001";
 
 const Inbox = () => {
   const navigate = useNavigate();
   const { user, loading: authLoading } = useAuth();
   const { toast } = useToast();
-  
+
   const [searchTerm, setSearchTerm] = useState("");
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // ✅ ESTADOS PARA PAGINACIÓN
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
+
   useEffect(() => {
     if (!authLoading && !user) {
-      navigate('/auth');
+      // navigate('/auth');
     }
   }, [user, authLoading, navigate]);
 
   useEffect(() => {
-    if (user) {
-      fetchDocuments();
-    }
-  }, [user]);
+    fetchDocuments();
+  }, []);
 
   const fetchDocuments = async () => {
-    if (!user) return;
-    
     setLoading(true);
-    const { data, error } = await supabase
-      .from('documents')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false });
+    try {
+      const response = await fetch(`${API_URL}/api/documents`);
+      if (!response.ok) throw new Error("Error al cargar datos");
 
-    if (error) {
-      toast({
-        title: 'Error',
-        description: 'No se pudieron cargar los documentos',
-        variant: 'destructive'
-      });
-    } else {
+      const data = await response.json();
       setDocuments(data || []);
+    } catch (error) {
+      console.error(error);
+      toast({
+        title: "Error de conexión",
+        description: "No se pudo conectar con el servidor.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
-  const deleteDocument = async (id: string, storagePath: string | null) => {
-    // Delete from storage first if exists
-    if (storagePath) {
-      await supabase.storage.from('documents').remove([storagePath]);
-    }
-    
-    const { error } = await supabase
-      .from('documents')
-      .delete()
-      .eq('id', id);
+  const deleteDocument = async (id: string) => {
+    if (!confirm("¿Estás seguro de eliminar este archivo permanentemente?"))
+      return;
 
-    if (error) {
-      toast({
-        title: 'Error',
-        description: 'No se pudo eliminar el documento',
-        variant: 'destructive'
+    try {
+      const response = await fetch(`${API_URL}/api/documents/${id}`, {
+        method: "DELETE",
       });
-    } else {
+
+      if (!response.ok) throw new Error("Fallo al eliminar");
+
       toast({
-        title: 'Eliminado',
-        description: 'El documento ha sido eliminado'
+        title: "Eliminado",
+        description: "El documento ha sido eliminado.",
       });
       fetchDocuments();
-    }
-  };
-
-  const downloadDocument = async (storagePath: string | null, filename: string) => {
-    if (!storagePath) return;
-    
-    const { data, error } = await supabase.storage
-      .from('documents')
-      .download(storagePath);
-
-    if (error) {
+    } catch (error) {
       toast({
-        title: 'Error',
-        description: 'No se pudo descargar el documento',
-        variant: 'destructive'
+        title: "Error",
+        variant: "destructive",
       });
-      return;
     }
-
-    const url = URL.createObjectURL(data);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
   };
 
+  const downloadDocument = (downloadUrl: string) => {
+    if (!downloadUrl) return;
+    window.open(`${API_URL}${downloadUrl}`, "_blank");
+  };
+
+  // --- LÓGICA DE FILTRADO, ORDENAMIENTO Y PAGINACIÓN ---
+
+  // 1. Filtrar por búsqueda
   const filteredDocuments = documents.filter((doc) =>
-    doc.original_filename.toLowerCase().includes(searchTerm.toLowerCase())
+    doc.originalName.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  // 2. ✅ Ordenar: Los más recientes primero (comparando fechas)
+  const sortedDocuments = filteredDocuments.sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+
+  // 3. ✅ Calcular índices para paginación
+  const indexOfLastItem = currentPage * itemsPerPage;
+  const indexOfFirstItem = indexOfLastItem - itemsPerPage;
+  const currentItems = sortedDocuments.slice(indexOfFirstItem, indexOfLastItem);
+  const totalPages = Math.ceil(sortedDocuments.length / itemsPerPage);
+
+  // 4. ✅ Funciones de cambio de página
+  const goToNextPage = () =>
+    setCurrentPage((prev) => Math.min(prev + 1, totalPages));
+  const goToPrevPage = () => setCurrentPage((prev) => Math.max(prev - 1, 1));
+
+  // --- FIN LÓGICA ---
+
   const getStatusBadge = (status: string) => {
-    const variants: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
+    const variants: Record<
+      string,
+      {
+        label: string;
+        variant: "default" | "secondary" | "destructive" | "outline";
+      }
+    > = {
       pending: { label: "Pendiente", variant: "outline" },
       processing: { label: "Procesando", variant: "secondary" },
-      completed: { label: "Completado", variant: "default" },
+      completed: { label: "Listo VUCEM", variant: "default" },
       error: { label: "Error", variant: "destructive" },
     };
-    
-    const { label, variant } = variants[status] || { label: status, variant: "outline" as const };
+    const { label, variant } = variants[status] || {
+      label: status,
+      variant: "outline",
+    };
     return <Badge variant={variant}>{label}</Badge>;
   };
 
   const getSourceIcon = (source: string) => {
     return source === "email" ? (
-      <Mail className="h-4 w-4 text-muted-foreground" />
+      <Mail className="h-4 w-4 text-purple-500" />
     ) : (
-      <Upload className="h-4 w-4 text-muted-foreground" />
+      <Upload className="h-4 w-4 text-blue-500" />
     );
   };
 
@@ -164,14 +175,24 @@ const Inbox = () => {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  const getFileTypeLabel = (type: string) => {
-    const labels: Record<string, string> = {
-      pdf: "PDF",
-      word: "Word",
-      excel: "Excel",
-      image: "Imagen",
-    };
-    return labels[type] || type;
+  const getFileIcon = (mimetype: string) => {
+    if (mimetype.includes("pdf"))
+      return <FileText className="h-5 w-5 text-red-500" />;
+    if (mimetype.includes("sheet") || mimetype.includes("excel"))
+      return <FileSpreadsheet className="h-5 w-5 text-green-600" />;
+    if (mimetype.includes("image"))
+      return <FileImage className="h-5 w-5 text-blue-500" />;
+    return <FileText className="h-5 w-5 text-gray-500" />;
+  };
+
+  const getFileTypeLabel = (mimetype: string) => {
+    if (mimetype.includes("pdf")) return "PDF";
+    if (mimetype.includes("word") || mimetype.includes("officedocument"))
+      return "Word";
+    if (mimetype.includes("sheet") || mimetype.includes("excel"))
+      return "Excel";
+    if (mimetype.includes("image")) return "Imagen";
+    return "Otro";
   };
 
   if (authLoading) {
@@ -185,7 +206,7 @@ const Inbox = () => {
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <Header />
-      
+
       <main className="flex-1 py-8">
         <div className="container">
           <div className="mb-8">
@@ -193,37 +214,44 @@ const Inbox = () => {
               Bandeja de Documentos
             </h1>
             <p className="text-muted-foreground">
-              Gestiona todos los documentos recibidos por correo o subidos manualmente
+              Historial completo y gestión avanzada de archivos
             </p>
           </div>
 
-          {/* Search and Actions */}
           <div className="flex flex-col sm:flex-row gap-4 mb-6">
             <div className="relative flex-1 max-w-md">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Buscar documentos..."
+                placeholder="Buscar por nombre..."
                 value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
+                onChange={(e) => {
+                  setSearchTerm(e.target.value);
+                  setCurrentPage(1); // Resetear a pag 1 si buscan algo
+                }}
                 className="pl-10"
               />
             </div>
-            <Button variant="outline" onClick={fetchDocuments} disabled={loading}>
-              <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-              Actualizar
+            <Button
+              variant="outline"
+              onClick={fetchDocuments}
+              disabled={loading}
+            >
+              <RefreshCw
+                className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`}
+              />
+              Actualizar Tabla
             </Button>
           </div>
 
-          {/* Documents Table */}
-          <div className="rounded-lg border border-border bg-card">
+          <div className="rounded-lg border border-border bg-card shadow-sm">
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12"></TableHead>
                   <TableHead>Documento</TableHead>
-                  <TableHead>Tipo Original</TableHead>
+                  <TableHead>Tipo</TableHead>
                   <TableHead>Origen</TableHead>
-                  <TableHead>Tamaño</TableHead>
+                  <TableHead>Peso Final</TableHead>
                   <TableHead>Estado</TableHead>
                   <TableHead>Fecha</TableHead>
                   <TableHead className="text-right">Acciones</TableHead>
@@ -236,66 +264,70 @@ const Inbox = () => {
                       <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mx-auto" />
                     </TableCell>
                   </TableRow>
-                ) : filteredDocuments.length === 0 ? (
+                ) : currentItems.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={8} className="text-center py-12">
                       <FileText className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                       <p className="text-muted-foreground">
-                        No hay documentos para mostrar
+                        No hay documentos encontrados.
                       </p>
                     </TableCell>
                   </TableRow>
                 ) : (
-                  filteredDocuments.map((doc) => (
-                    <TableRow key={doc.id}>
-                      <TableCell>
-                        <FileText className="h-5 w-5 text-primary" />
-                      </TableCell>
+                  currentItems.map((doc) => (
+                    <TableRow key={doc._id}>
+                      <TableCell>{getFileIcon(doc.mimetype)}</TableCell>
                       <TableCell className="font-medium">
-                        {doc.converted_filename || doc.original_filename}
+                        <span
+                          title={doc.originalName}
+                          className="truncate max-w-[200px] block"
+                        >
+                          {doc.originalName}
+                        </span>
                       </TableCell>
-                      <TableCell>{getFileTypeLabel(doc.file_type)}</TableCell>
+                      <TableCell>{getFileTypeLabel(doc.mimetype)}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
                           {getSourceIcon(doc.source)}
-                          <span className="text-sm">
-                            {doc.source === "email" ? "Correo" : "Manual"}
+                          <span className="text-sm capitalize">
+                            {doc.source}
                           </span>
                         </div>
                       </TableCell>
-                      <TableCell>{formatFileSize(doc.file_size)}</TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {formatFileSize(doc.size)}
+                      </TableCell>
                       <TableCell>{getStatusBadge(doc.status)}</TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {new Date(doc.created_at).toLocaleString('es-MX')}
+                      <TableCell className="text-muted-foreground text-xs">
+                        {new Date(doc.createdAt).toLocaleDateString("es-MX", {
+                          day: "2-digit",
+                          month: "short",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-2">
-                          <Button 
-                            variant="ghost" 
-                            size="icon" 
-                            title="Ver"
-                            disabled={!doc.storage_path}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Descargar PDF VUCEM"
+                            disabled={doc.status !== "completed"}
+                            onClick={() => downloadDocument(doc.downloadUrl)}
                           >
-                            <Eye className="h-4 w-4" />
+                            <Download
+                              className={`h-4 w-4 ${
+                                doc.status === "completed"
+                                  ? "text-blue-600"
+                                  : ""
+                              }`}
+                            />
                           </Button>
                           <Button
                             variant="ghost"
                             size="icon"
-                            title="Descargar"
-                            disabled={doc.status !== "completed" || !doc.converted_storage_path}
-                            onClick={() => downloadDocument(
-                              doc.converted_storage_path || doc.storage_path, 
-                              doc.converted_filename || doc.original_filename
-                            )}
-                          >
-                            <Download className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            title="Eliminar"
-                            className="text-destructive hover:text-destructive"
-                            onClick={() => deleteDocument(doc.id, doc.storage_path)}
+                            className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                            onClick={() => deleteDocument(doc._id)}
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
@@ -306,38 +338,72 @@ const Inbox = () => {
                 )}
               </TableBody>
             </Table>
+
+            {/* ✅ CONTROLES DE PAGINACIÓN */}
+            {!loading && sortedDocuments.length > 0 && (
+              <div className="flex items-center justify-between px-4 py-4 border-t border-border">
+                <div className="text-sm text-muted-foreground">
+                  Mostrando {indexOfFirstItem + 1} a{" "}
+                  {Math.min(indexOfLastItem, sortedDocuments.length)} de{" "}
+                  {sortedDocuments.length} resultados
+                </div>
+                <div className="flex items-center space-x-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={goToPrevPage}
+                    disabled={currentPage === 1}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    Anterior
+                  </Button>
+                  <div className="text-sm font-medium">
+                    Página {currentPage} de {totalPages}
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={goToNextPage}
+                    disabled={currentPage === totalPages}
+                  >
+                    Siguiente
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* Stats */}
           <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
+            {/* ... Tus Stats existentes se mantienen igual ... */}
             <div className="p-4 rounded-lg bg-muted/50 border border-border">
               <p className="text-2xl font-bold text-foreground">
                 {documents.length}
               </p>
-              <p className="text-sm text-muted-foreground">Total Documentos</p>
+              <p className="text-sm text-muted-foreground">Total Histórico</p>
             </div>
-            <div className="p-4 rounded-lg bg-muted/50 border border-border">
-              <p className="text-2xl font-bold text-foreground">
+            <div className="p-4 rounded-lg bg-green-50 border border-green-100">
+              <p className="text-2xl font-bold text-green-700">
                 {documents.filter((d) => d.status === "completed").length}
               </p>
-              <p className="text-sm text-muted-foreground">Completados</p>
+              <p className="text-sm text-green-600">Listos para VUCEM</p>
             </div>
-            <div className="p-4 rounded-lg bg-muted/50 border border-border">
-              <p className="text-2xl font-bold text-foreground">
+            <div className="p-4 rounded-lg bg-purple-50 border border-purple-100">
+              <p className="text-2xl font-bold text-purple-700">
                 {documents.filter((d) => d.source === "email").length}
               </p>
-              <p className="text-sm text-muted-foreground">Por Correo</p>
+              <p className="text-sm text-purple-600">Vía Email</p>
             </div>
-            <div className="p-4 rounded-lg bg-muted/50 border border-border">
-              <p className="text-2xl font-bold text-foreground">
-                {documents.filter((d) => d.status === "pending").length}
+            <div className="p-4 rounded-lg bg-blue-50 border border-blue-100">
+              <p className="text-2xl font-bold text-blue-700">
+                {documents.filter((d) => d.source === "manual").length}
               </p>
-              <p className="text-sm text-muted-foreground">Pendientes</p>
+              <p className="text-sm text-blue-600">Subida Manual</p>
             </div>
           </div>
         </div>
       </main>
-      
+
       <Footer />
     </div>
   );

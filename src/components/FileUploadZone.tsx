@@ -9,6 +9,7 @@ import {
   FileSpreadsheet,
   FileText as FileTextIcon,
   Loader2,
+  History,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
@@ -48,20 +49,12 @@ const FileUploadZone = () => {
     return File;
   };
 
-  const getFileType = (mimeType: string): string => {
-    if (mimeType === "application/pdf") return "pdf";
-    if (mimeType.includes("word")) return "word";
-    if (mimeType.includes("excel") || mimeType.includes("spreadsheet"))
-      return "excel";
-    if (mimeType.startsWith("image/")) return "image";
-    return "other";
-  };
-
+  // ✅ ÚNICA FUNCIÓN NECESARIA PARA COMUNICARSE CON EL BACKEND
   const uploadFileToServer = async (file: File) => {
     const formData = new FormData();
     formData.append("file", file);
 
-    // Usamos la URL completa del backend para evitar fallos de proxy
+    // Confirmado puerto 3001
     const res = await fetch("http://localhost:3001/api/upload", {
       method: "POST",
       body: formData,
@@ -71,40 +64,6 @@ const FileUploadZone = () => {
       throw new Error(`Fallo al subir: ${file.name}`);
     }
 
-    return await res.json();
-  };
-
-  // Crear el documento en MongoDB (backend propio)
-  const createDocumentRecord = async (payload: {
-    originalName: string;
-    mimeType: string;
-    size: number;
-    source: "manual";
-  }) => {
-    const res = await fetch("/api/documents", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      const err = await res.text().catch(() => "");
-      throw new Error(`Fallo al crear documento: ${err}`);
-    }
-    return (await res.json()) as { id: string };
-  };
-
-  // Solicitar conversión VUCEM (backend propio)
-  // Puedes no implementar esto hoy y dejar el documento en "pending"
-  const requestVucemConversion = async (documentId: string) => {
-    const res = await fetch(`/api/convert`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ documentId }),
-    });
-    if (!res.ok) {
-      const err = await res.text().catch(() => "");
-      throw new Error(`Fallo al encolar conversión: ${err}`);
-    }
     return await res.json();
   };
 
@@ -123,6 +82,7 @@ const FileUploadZone = () => {
       toast.error(`Tipo de archivo no soportado: ${file.name}`);
       return false;
     }
+    // ConvertAPI soporta hasta 100MB, pero podemos dejar tu límite de seguridad en 50
     if (file.size > 50 * 1024 * 1024) {
       toast.error(`Archivo muy grande (máx 50MB): ${file.name}`);
       return false;
@@ -165,6 +125,7 @@ const FileUploadZone = () => {
     setUploadedFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
+  // ✅ FUNCIÓN CORREGIDA Y LIMPIA
   const handleDigitalize = async () => {
     if (!user) {
       toast.error("Debes iniciar sesión para digitalizar documentos");
@@ -177,6 +138,7 @@ const FileUploadZone = () => {
       return;
     }
 
+    // Filtramos para ver si hay algo pendiente
     const pendingFiles = uploadedFiles.filter(
       (f) => f.status === "pending" || f.status === "error"
     );
@@ -188,24 +150,27 @@ const FileUploadZone = () => {
     setIsProcessing(true);
 
     for (const uploadedFile of uploadedFiles) {
+      // 🛡️ SOLUCIÓN AL BUG DE DUPLICADOS:
+      // Si ya está completo o subiéndose, lo saltamos.
       if (
         uploadedFile.status === "completed" ||
         uploadedFile.status === "uploading"
       ) {
         continue;
       }
+
       try {
-        // Marcamos como "subiendo"
+        // Estado: Subiendo...
         setUploadedFiles((prev) =>
           prev.map((f) =>
             f.id === uploadedFile.id ? { ...f, status: "uploading" } : f
           )
         );
 
-        // --- UN SOLO PASO: SUBIDA Y REGISTRO ---
-        const uploadResp = await uploadFileToServer(uploadedFile.file);
+        // Llamada al Backend (Todo en Uno)
+        await uploadFileToServer(uploadedFile.file);
 
-        // Si llegó aquí, el backend ya lo guardó en Mongo y generó el PDF VUCEM
+        // Estado: Completado
         setUploadedFiles((prev) =>
           prev.map((f) =>
             f.id === uploadedFile.id ? { ...f, status: "completed" } : f
@@ -224,6 +189,7 @@ const FileUploadZone = () => {
 
     setIsProcessing(false);
     toast.success("Proceso finalizado");
+    window.dispatchEvent(new Event("document-uploaded"));
   };
 
   const formatFileSize = (bytes: number) => {
@@ -335,12 +301,13 @@ const FileUploadZone = () => {
       )}
 
       {/* Digitalize Button */}
-      <div className="mt-8 flex justify-center">
+      <div className="mt-8 flex flex-col items-center gap-4">
+        {/* Botón Principal: Digitalizar */}
         <Button
           size="lg"
           onClick={handleDigitalize}
           disabled={uploadedFiles.length === 0 || isProcessing}
-          className="px-12 py-6 text-lg font-semibold"
+          className="px-12 py-6 text-lg font-semibold shadow-lg hover:shadow-xl transition-all"
         >
           {isProcessing ? (
             <>
@@ -350,9 +317,19 @@ const FileUploadZone = () => {
           ) : (
             <>
               <FileUp className="mr-2 h-5 w-5" />
-              Digitalizar
+              Digitalizar Archivos
             </>
           )}
+        </Button>
+
+        {/* ✅ Botón Secundario: Ir al Inbox */}
+        <Button
+          variant="ghost"
+          onClick={() => navigate("/inbox")}
+          className="text-muted-foreground hover:text-primary"
+        >
+          <History className="mr-2 h-4 w-4" />
+          Ver historial y descargar documentos
         </Button>
       </div>
 
