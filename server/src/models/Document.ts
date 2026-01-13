@@ -1,19 +1,26 @@
 import mongoose from "mongoose";
 
 const DocumentSchema = new mongoose.Schema({
-  filename: { type: String, required: true },
   originalName: { type: String, required: true },
-  path: { type: String, required: true },
-  mimetype: { type: String, required: true },
-  size: { type: Number, required: true }, // Importante para el límite de 10MB
+  storedName: { type: String, required: true }, // El nombre en vucem_ready
+  mimetype: { type: String, required: true }, // Para la columna "Tipo Original"
+  size: { type: Number, required: true }, // Peso final en bytes
+  source: {
+    type: String,
+    enum: ["email", "manual"],
+    default: "manual",
+  },
   status: {
     type: String,
-    enum: ["Recibido", "Procesando", "VUCEM_Listo", "Error"],
-    default: "Recibido",
+    enum: ["pending", "completed", "error"],
+    default: "pending",
   },
-  dpi: { type: Number, default: 72 }, // Valor inicial, luego lo subiremos a 300
-  source: { type: String, enum: ["Manual", "Email"], default: "Manual" },
-  createdAt: { type: Date, default: Date.now },
+  downloadUrl: { type: String }, // Ruta para descargarlo
+  errorMessage: { type: String },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
 });
 
-export default mongoose.model("Document", DocumentSchema);
+export const DocumentModel = mongoose.model("Document", DocumentSchema);

@@ -3,7 +3,7 @@ import { simpleParser } from "mailparser";
 import fs from "fs";
 import path from "path";
 import { VucemProcessor } from "./vucemProcessor";
-import Document from "../models/Document";
+import { DocumentModel } from "../models/Document";
 
 export class EmailService {
   private client: ImapFlow;
@@ -78,32 +78,44 @@ export class EmailService {
         fs.writeFileSync(filePath, attachment.content);
 
         // 2. Crear registro en MongoDB
-        const newDoc = new Document({
-          filename: filename,
+        const newDoc = new DocumentModel({
           originalName: originalName,
-          path: filePath,
-          mimetype: attachment.contentType,
+          storedName: filename, // Usamos el nombre del archivo guardado en disco
+          mimetype: attachment.contentType || "application/pdf",
           size: attachment.size,
-          source: "Email", // Identificamos que vino por correo
-          status: "Recibido",
+          source: "email", // En minúscula para coincidir con el Schema
+          status: "pending", // Estado inicial
+          downloadUrl: "", // Aún no tiene URL final
         });
         await newDoc.save();
 
         // 3. Procesar para VUCEM automáticamente
         try {
           console.log(`⚙️ Procesando adjunto: ${originalName}`);
-          await VucemProcessor.process(
+          const outputPath = await VucemProcessor.process(
             filePath,
-            attachment.contentType || "application/octet-stream"
+            attachment.contentType || "application/octet-stream",
+            "email"
           );
-          newDoc.status = "VUCEM_Listo";
+          // ACTUALIZAMOS EL REGISTRO CON ÉXITO
+          newDoc.status = "completed";
+          newDoc.storedName = path.basename(outputPath); // Actualizamos al nombre final (vucem_ready)
+          newDoc.size = fs.statSync(outputPath).size; // Actualizamos el peso final real
+          newDoc.downloadUrl = `/uploads/vucem_ready/${path.basename(
+            outputPath
+          )}`;
           await newDoc.save();
-          // LIMPIEZA: Liberamos espacio
-          await VucemProcessor.cleanupOriginal(filePath);
-          console.log(`✅ Adjunto procesado y listo.`);
-        } catch (error) {
+
+          // LIMPIEZA: Solo si quieres borrar el original de la carpeta uploads (opcional)
+          // await VucemProcessor.cleanupOriginal(filePath);
+
+          console.log(`✅ Adjunto procesado y registrado en DB.`);
+        } catch (error: any) {
           console.error(`❌ Error procesando adjunto de email:`, error);
-          newDoc.status = "Error";
+
+          // ACTUALIZAMOS EL REGISTRO CON ERROR
+          newDoc.status = "error";
+          newDoc.errorMessage = error.message;
           await newDoc.save();
         }
       }

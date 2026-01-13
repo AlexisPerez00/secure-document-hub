@@ -7,7 +7,7 @@ import type { Request, Response } from "express";
 import "dotenv/config";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
-import Document from "./models/Document";
+import { DocumentModel } from "./models/Document";
 import { VucemProcessor } from "./services/vucemProcessor";
 import { EmailService } from "./services/emailService";
 
@@ -72,90 +72,60 @@ const upload = multer({
   },
 });
 
-// 2. ACTUALIZACIÓN: Ruta para subida con persistencia REAL
-// MODIFICAMOS LA RUTA para manejar el error de tamaño
-app.post("/api/documents", async (req: Request, res: Response) => {
+app.get("/api/documents", async (req, res) => {
   try {
-    const { originalName, mimeType, size, source } = req.body;
-
-    // Creamos un registro preliminar en MongoDB
-    const newDoc = new Document({
-      filename: "pending", // Se actualizará al subir el archivo
-      originalName,
-      mimetype: mimeType,
-      size,
-      source: source || "Manual",
-      status: "Recibido",
-    });
-
-    await newDoc.save();
-
-    // Devolvemos el ID para que el frontend sepa a qué registro pertenece el archivo
-    res.json({ id: newDoc._id });
+    // Traemos todos los documentos ordenados por fecha (el más nuevo arriba)
+    const docs = await DocumentModel.find().sort({ processedAt: -1 });
+    res.json(docs);
   } catch (error) {
-    console.error("Error al crear registro:", error);
-    res.status(500).json({ error: "Error al crear registro inicial" });
+    console.error("Error fetching documents:", error);
+    res.status(500).json({ error: "Error al obtener historial" });
   }
 });
-
 // ─────────────────────────────────────────────
 // 2. RUTA PARA SUBIDA DE ARCHIVOS (POST /api/upload)
-// Asegúrate de que esta ruta coincida con lo que el frontend envía
 // ─────────────────────────────────────────────
-// RUTA ACTUALIZADA EN index.ts
-// ─────────────────────────────────────────────
+
 app.post(
   "/api/upload",
   upload.single("file"),
   async (req: Request, res: Response) => {
+    const uploadedFilePath = req.file?.path;
     try {
-      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+      if (!req.file || !uploadedFilePath) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
 
-      // 1. Guardamos el registro en MongoDB
-      const newDoc = new Document({
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        path: req.file.path,
-        mimetype: req.file.mimetype,
-        size: req.file.size,
-        status: "Recibido",
-      });
-      await newDoc.save();
+      console.log(`🚀 Recibido manual: ${req.file.originalname}`);
 
-      // 2. PROCESAMIENTO UNIVERSAL (Quitamos el 'if' de imagen)
-      console.log(
-        `🚀 Recibido: ${req.file.originalname} | Tipo: ${req.file.mimetype}`
+      // 2. LLAMAR AL PROCESADOR (Él se encarga de convertir y GUARDAR en la BD)
+      const vucemPath = await VucemProcessor.process(
+        uploadedFilePath,
+        req.file.mimetype,
+        "manual"
       );
 
       try {
-        // Llamamos al procesador para CUALQUIER tipo de archivo
-        const vucemPath = await VucemProcessor.process(
-          req.file.path,
-          req.file.mimetype
-        );
-
-        newDoc.status = "VUCEM_Listo";
-        // Si es imagen, marcamos los 300 DPI
-        if (req.file.mimetype.startsWith("image/")) newDoc.dpi = 300;
-
-        await newDoc.save();
-        console.log(`✅ Procesado con éxito: ${vucemPath}`);
-        // LIMPIEZA: Borramos el original después de procesar con éxito
-        await VucemProcessor.cleanupOriginal(req.file.path);
-      } catch (procError) {
-        // Si algo falla (ej. la API de Cloudmersive), lo registramos
-        console.error(
-          "❌ Fallo el proceso VUCEM para este archivo:",
-          procError
-        );
-        newDoc.status = "Error";
-        await newDoc.save();
+        if (fs.existsSync(uploadedFilePath)) {
+          fs.unlinkSync(uploadedFilePath);
+          console.log(`🧹 Archivo temporal eliminado: ${uploadedFilePath}`);
+        }
+      } catch (cleanupError) {
+        console.error("Error limpiando temporal:", cleanupError);
       }
-
-      res.json({ message: "Archivo recibido", data: newDoc });
-    } catch (error) {
-      console.error("Error en servidor:", error);
-      res.status(500).json({ error: "Error interno" });
+      // 3. Responder Éxito
+      res.json({
+        message: "Archivo procesado correctamente",
+        path: vucemPath,
+      });
+    } catch (error: any) {
+      console.error("Error en upload:", error);
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try {
+          fs.unlinkSync(uploadedFilePath);
+        } catch (e) {}
+      }
+      res.status(500).json({ error: error.message });
     }
   }
 );

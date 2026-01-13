@@ -1,1 +1,1 @@
-declare module "cloudmersive-convert-api-client";
+// declare module "cloudmersive-convert-api-client";

@@ -177,9 +177,23 @@ const FileUploadZone = () => {
       return;
     }
 
+    const pendingFiles = uploadedFiles.filter(
+      (f) => f.status === "pending" || f.status === "error"
+    );
+    if (pendingFiles.length === 0) {
+      toast.info("Todos los archivos ya fueron procesados.");
+      return;
+    }
+
     setIsProcessing(true);
 
     for (const uploadedFile of uploadedFiles) {
+      if (
+        uploadedFile.status === "completed" ||
+        uploadedFile.status === "uploading"
+      ) {
+        continue;
+      }
       try {
         // Marcamos como "subiendo"
         setUploadedFiles((prev) =>
@@ -189,7 +203,6 @@ const FileUploadZone = () => {
         );
 
         // --- UN SOLO PASO: SUBIDA Y REGISTRO ---
-        // Llamamos directamente a la subida. Nuestro backend se encarga del resto.
         const uploadResp = await uploadFileToServer(uploadedFile.file);
 
         // Si llegó aquí, el backend ya lo guardó en Mongo y generó el PDF VUCEM

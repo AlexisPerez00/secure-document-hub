@@ -11,11 +11,12 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "cloudmersive-convert-api-client": "^2.8.0",
+    "convertapi": "^1.15.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "imapflow": "^1.2.6",
+    "libreoffice-convert": "^1.7.0",
     "mailparser": "^3.9.1",
     "mongoose": "^9.1.2",
     "multer": "^2.0.2",
