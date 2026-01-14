@@ -9,7 +9,7 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { DocumentModel } from "./models/Document";
 import { VucemProcessor } from "./services/vucemProcessor";
-// import { EmailService } from "./services/emailService";
+import { EmailService } from "./services/emailService";
 
 dotenv.config();
 // Sustituye esta URL por la de tu base de datos local o de Atlas después
@@ -21,8 +21,8 @@ mongoose
 
     // --- ARRANCAR EL BUZÓN DE EMAIL ---
     // Solo lo iniciamos después de confirmar que la DB funciona
-    // const emailService = new EmailService();
-    // emailService.start();
+    const emailService = new EmailService();
+    emailService.start();
   })
   .catch((err) => console.error("❌ Error de conexión a MongoDB:", err));
 
