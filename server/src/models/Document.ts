@@ -12,7 +12,7 @@ const DocumentSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ["pending", "completed", "error"],
+    enum: ["pending", "processing", "completed", "error"],
     default: "pending",
   },
   downloadUrl: { type: String }, // Ruta para descargarlo

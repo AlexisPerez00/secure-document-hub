@@ -3,7 +3,7 @@ import { simpleParser } from "mailparser";
 import fs from "fs";
 import path from "path";
 import { VucemProcessor } from "./vucemProcessor";
-import { DocumentModel } from "../models/Document";
+
 export class EmailService {
   private client: ImapFlow;
   private uploadDir = path.resolve(__dirname, "../../uploads");
@@ -23,18 +23,14 @@ export class EmailService {
 
   async start() {
     try {
-      // 1. ESCUCHAR ERRORES GLOBALES DEL CLIENTE (Vital para que no se caiga la app)
       this.client.on("error", (err) => {
         console.error("⚠️ Error de red en el buzón (IMAP):", err.message);
-        // No hacemos throw, solo informamos. ImapFlow intentará reconectar o fallará silenciosamente.
       });
       await this.client.connect();
       console.log("📧 Conectado al servidor de correo. Esperando mensajes...");
 
-      // Seleccionamos la bandeja de entrada
       let lock = await this.client.getMailboxLock("INBOX");
       try {
-        // Escuchamos nuevos correos (evento 'exists')
         this.client.on("exists", async (data) => {
           await this.processLastEmail();
         });
@@ -43,22 +39,18 @@ export class EmailService {
       }
     } catch (err) {
       console.error("❌ Error en conexión IMAP:", err);
-      // Reintento de conexión en 10 segundos
       setTimeout(() => this.start(), 10000);
     }
   }
 
   private async processLastEmail() {
-    // Buscamos el mensaje más reciente que no hayamos leído
+    // Buscamos el último mensaje
     let message = await this.client.fetchOne("*", { source: true });
 
-    // VALIDACIÓN CRÍTICA: Si no hay mensaje o no tiene contenido (source), salimos.
     if (!message || !message.source) {
-      console.log("Empty message or no source found.");
       return;
     }
 
-    // Analizamos el contenido del correo
     const parsed = await simpleParser(message.source);
 
     if (parsed.attachments && parsed.attachments.length > 0) {
@@ -68,43 +60,42 @@ export class EmailService {
       );
 
       for (const attachment of parsed.attachments) {
-        // Fallback por si el adjunto no tiene nombre
         const originalName = attachment.filename || `file-${Date.now()}`;
         const filename = `${Date.now()}-${originalName}`;
         const filePath = path.join(this.uploadDir, filename);
 
-        // 1. Guardar archivo físico
-        fs.writeFileSync(filePath, attachment.content);
-
-        // 2. Crear registro en MongoDB
-        const newDoc = new DocumentModel({
-          originalName: originalName,
-          storedName: filename,
-          mimetype: attachment.contentType || "application/pdf",
-          size: attachment.size,
-          source: "email",
-          status: "pending",
-        });
-
-        await newDoc.save();
-
-        // 3. Procesar para VUCEM automáticamente
         try {
-          console.log(`⚙️ Procesando adjunto: ${originalName}`);
+          // 1. Guardar físico temporal
+          fs.writeFileSync(filePath, attachment.content);
+          console.log(`⚙️ Enviando a procesar: ${originalName}...`);
+
+          // 2. LLAMADA AL PROCESADOR
+          // (Sin arrays de reporte, porque quitamos las notificaciones)
           await VucemProcessor.process(
             filePath,
-            attachment.contentType || "application/octet-stream"
+            attachment.contentType || "application/octet-stream",
+            "email",
+            originalName
           );
-          newDoc.status = "completed";
-          await newDoc.save();
-          // LIMPIEZA: Liberamos espacio
+
+          // 3. Limpieza inmediata
           await VucemProcessor.cleanupOriginal(filePath);
-          console.log(`✅ Adjunto procesado y listo.`);
-        } catch (error) {
-          console.error(`❌ Error procesando adjunto de email:`, error);
-          newDoc.status = "error";
-          await newDoc.save();
+        } catch (error: any) {
+          console.error(`❌ Error en archivo ${originalName}:`, error.message);
+          // Limpieza de emergencia
+          try {
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+          } catch (e) {}
         }
+      }
+
+      //  BORRAR EL CORREO
+      try {
+        // Usamos message.seq para decirle al servidor "borra este que acabo de leer"
+        await this.client.messageDelete(String(message.seq));
+        console.log("🗑️ Correo procesado y eliminado del servidor.");
+      } catch (err) {
+        console.error("⚠️ No se pudo eliminar el correo:", err);
       }
     }
   }

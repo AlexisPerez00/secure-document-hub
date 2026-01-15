@@ -1,155 +1,94 @@
-import sharp from "sharp";
+import ConvertAPI from "convertapi";
 import path from "path";
 import fs from "fs";
-import { PDFDocument } from "pdf-lib";
 import { DocumentModel } from "../models/Document";
-const convertapi = require("convertapi")(process.env.CONVERTAPI_SECRET);
+
+// Configura tu clave
+const convertapi = new ConvertAPI(process.env.CONVERTAPI_SECRET || "");
 
 export class VucemProcessor {
-  private static outputDir = path.resolve(
-    __dirname,
-    "../../uploads/vucem_ready"
-  );
-
-  private static ensureDirectory() {
-    if (!fs.existsSync(this.outputDir)) {
-      fs.mkdirSync(this.outputDir, { recursive: true });
-    }
-  }
-
   static async process(
     filePath: string,
     mimetype: string,
-    source: "email" | "manual" = "manual"
+    source: "manual" | "email",
+    customOriginalName?: string
   ): Promise<string> {
-    this.ensureDirectory();
-    const absolutePath = path.resolve(filePath);
-    const fileName = path.basename(absolutePath, path.extname(absolutePath));
-    const extension = path.extname(absolutePath).toLowerCase();
-    const outputPath = path.join(this.outputDir, `${fileName}-vucem.pdf`);
+    // Usamos el nombre real si nos lo dan, si no, sacamos el nombre del archivo
+    const realName = customOriginalName || path.basename(filePath);
+
+    // Creamos el registro en BD aquí (Centralizado)
+    const doc = new DocumentModel({
+      originalName: realName,
+      storedName: path.basename(filePath), // Temporalmente el nombre del archivo subido
+      mimetype: mimetype,
+      size: fs.statSync(filePath).size,
+      source: source, // ✅ Respetamos la fuente que nos manden (email o manual)
+      status: "processing",
+    });
+
+    await doc.save();
 
     try {
-      // --- ESCENARIO A: IMÁGENES (Local con Sharp - Gratis e Instantáneo) ---
-      if (mimetype.startsWith("image/")) {
-        console.log("📸 Optimizando imagen localmente...");
-        const buffer = await sharp(absolutePath)
-          .grayscale()
-          .jpeg({ quality: 60 })
-          .toBuffer();
-        const pdfDoc = await PDFDocument.create();
-        const image = await pdfDoc.embedJpg(buffer);
-        const page = pdfDoc.addPage([
-          (image.width * 72) / 300,
-          (image.height * 72) / 300,
-        ]);
-        page.drawImage(image, {
-          x: 0,
-          y: 0,
-          width: page.getWidth(),
-          height: page.getHeight(),
+      const fileName = path.basename(filePath, path.extname(filePath));
+      const outputDir = path.join(__dirname, "../../uploads/vucem_ready");
+
+      // Asegurar que existe la carpeta de salida
+      if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+      }
+
+      // Lógica de conversión (PDF vs Otros)
+      let result;
+      if (mimetype === "application/pdf") {
+        // Comprimir PDF
+        result = await convertapi.convert(
+          "compress",
+          {
+            File: filePath,
+            PreservePDFA: true,
+          },
+          "pdf"
+        );
+      } else {
+        // Convertir a PDF (Word, Excel, Imagen)
+        result = await convertapi.convert("pdf", {
+          File: filePath,
         });
-        fs.writeFileSync(outputPath, await pdfDoc.save());
-      }
-      // --- ESCENARIO B: OFFICE Y PDFS (ConvertAPI - Soporta hasta 100MB) ---
-      else {
-        const stats = fs.statSync(absolutePath);
-        const sizeMB = stats.size / (1024 * 1024);
-
-        let result;
-
-        if (sizeMB > 3) {
-          console.log(
-            `🗜️ Archivo pesado (${sizeMB.toFixed(
-              2
-            )}MB). Aplicando compresión AGRESIVA...`
-          );
-
-          if (extension === ".pdf") {
-            // CORRECCIÓN: Para 'compress' usamos 'web' (que equivale al peso mínimo)
-            result = await convertapi.convert(
-              "compress",
-              {
-                File: absolutePath,
-                Preset: "web",
-              },
-              "pdf"
-            );
-          } else {
-            // Para convertir Office, 'minimum' sí suele ser aceptado,
-            // pero usaremos 'screen' para asegurar compatibilidad total
-            result = await convertapi.convert(
-              "pdf",
-              {
-                File: absolutePath,
-                PdfOptimization: "screen",
-              },
-              extension.replace(".", "")
-            );
-          }
-        } else {
-          console.log(
-            `📄 Archivo ligero (${sizeMB.toFixed(
-              2
-            )}MB). Manteniendo calidad estándar...`
-          );
-
-          result = await convertapi.convert(
-            "pdf",
-            {
-              File: absolutePath,
-              PdfOptimization: "screen",
-            },
-            extension.replace(".", "")
-          );
-        }
-
-        await result.saveFiles(this.outputDir);
-
-        const tempPath = path.join(this.outputDir, `${fileName}.pdf`);
-        if (fs.existsSync(tempPath)) {
-          fs.renameSync(tempPath, outputPath);
-        }
       }
 
-      // --- RESULTADO FINAL EN CONSOLA ---
-      const finalStats = fs.statSync(outputPath);
-      const finalSizeMB = finalStats.size / (1024 * 1024);
+      // Guardar el archivo resultante
+      const savedFiles = await result.saveFiles(outputDir);
+      const outputPath = savedFiles[0]; // ConvertAPI devuelve un array
 
-      // 💾 GUARDADO EN MONGODB
-      try {
-        await DocumentModel.create({
-          originalName: fileName, // El nombre sin la extensión extra
-          storedName: path.basename(outputPath),
-          mimetype: mimetype, // "application/pdf" o "image/jpeg"
-          size: finalStats.size,
-          source: source,
-          status: "completed",
-          downloadUrl: `/uploads/vucem_ready/${path.basename(outputPath)}`,
-        });
-        console.log("💾 Registro guardado en base de datos.");
-      } catch (dbError) {
-        console.error("Error guardando en DB:", dbError);
-        // No lanzamos error aquí para no detener el flujo si el archivo ya se creó
-      }
+      // Actualizar BD con Éxito
+      doc.status = "completed";
+      doc.storedName = path.basename(outputPath); // Ahora apunta al archivo final en vucem_ready
+      doc.size = fs.statSync(outputPath).size;
+      doc.downloadUrl = `/uploads/vucem_ready/${path.basename(outputPath)}`;
+      await doc.save();
 
-      console.log(
-        `✅ ¡Éxito! Archivo optimizado: ${finalSizeMB.toFixed(2)} MB`
-      );
       return outputPath;
     } catch (error: any) {
-      console.error(`❌ Error en VucemProcessor:`, error.message);
-      throw error;
+      console.error("Error en VucemProcessor:", error);
+
+      // Actualizar BD con Error
+      doc.status = "error";
+      doc.errorMessage = error.message;
+      await doc.save();
+
+      throw error; // Re-lanzamos para que EmailService se entere y mande el correo
     }
   }
 
+  // Helper para limpiar
   static async cleanupOriginal(filePath: string) {
-    if (fs.existsSync(filePath)) {
-      try {
+    try {
+      if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
-        console.log(`🗑️ Temporal eliminado.`);
-      } catch (e) {
-        /* ignore */
+        console.log(`🧹 Temporal eliminado: ${filePath}`);
       }
+    } catch (e) {
+      console.error("Error limpiando temporal:", e);
     }
   }
 }
