@@ -10,9 +10,13 @@ import mongoose from "mongoose";
 import { DocumentModel } from "./models/Document";
 import { VucemProcessor } from "./services/vucemProcessor";
 import { EmailService } from "./services/emailService";
+import { exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
 
 dotenv.config();
-// Sustituye esta URL por la de tu base de datos local o de Atlas después
+
 // --- CONEXIÓN A MONGODB ---
 mongoose
   .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/secure_hub")
@@ -20,7 +24,6 @@ mongoose
     console.log("✅ Conectado a MongoDB");
 
     // --- ARRANCAR EL BUZÓN DE EMAIL ---
-    // Solo lo iniciamos después de confirmar que la DB funciona
     const emailService = new EmailService();
     emailService.start();
   })
@@ -39,7 +42,6 @@ app.get("/api/health", (_req: Request, res: Response) => {
 });
 
 // CONFIGURACIÓN DE ALMACENAMIENTO (MULTER)
-// Ajustamos para que suba un nivel si la carpeta 'uploads' está fuera de 'src'
 const uploadDir = path.resolve(__dirname, "..", "uploads");
 
 if (!fs.existsSync(uploadDir)) {
@@ -51,7 +53,9 @@ const storage = multer.diskStorage({
   filename: (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
 });
 
-const UPLOAD_BUFFER_SIZE = 30 * 1024 * 1024;
+// 📝 LÍMITE AUMENTADO: Archivos originales pueden ser grandes antes de compresión
+// VUCEM requiere max 3MB en el OUTPUT, no en el INPUT
+const UPLOAD_BUFFER_SIZE = 20 * 1024 * 1024; // 20 MB para permitir compresión
 
 const upload = multer({
   storage,
@@ -65,6 +69,9 @@ const upload = multer({
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "image/jpeg",
       "image/png",
+      "image/jpg",
+      "image/tiff",
+      "image/bmp",
     ];
     if (!allowed.includes(file.mimetype)) {
       return cb(new Error("Tipo de archivo no permitido para VUCEM"));
@@ -73,9 +80,9 @@ const upload = multer({
   },
 });
 
+// RUTA: OBTENER HISTORIAL DE DOCUMENTOS
 app.get("/api/documents", async (req, res) => {
   try {
-    // Traemos todos los documentos ordenados por fecha (el más nuevo arriba)
     const docs = await DocumentModel.find().sort({ processedAt: -1 });
     res.json(docs);
   } catch (error) {
@@ -83,10 +90,8 @@ app.get("/api/documents", async (req, res) => {
     res.status(500).json({ error: "Error al obtener historial" });
   }
 });
-// ─────────────────────────────────────────────
-// 2. RUTA PARA SUBIDA DE ARCHIVOS (POST /api/upload)
-// ─────────────────────────────────────────────
 
+// RUTA: SUBIDA DE ARCHIVOS (POST /api/upload)
 app.post(
   "/api/upload",
   upload.single("file"),
@@ -97,15 +102,40 @@ app.post(
         return res.status(400).json({ error: "No file uploaded" });
       }
 
-      console.log(`🚀 Recibido manual: ${req.file.originalname}`);
+      console.log(`🚀 Archivo recibido (manual): ${req.file.originalname}`);
+      console.log(
+        `📊 Tamaño original: ${(req.file.size / 1024 / 1024).toFixed(2)} MB`,
+      );
 
-      // 2. LLAMAR AL PROCESADOR (Él se encarga de convertir y GUARDAR en la BD)
+      // ✅ VALIDACIÓN PREVIA (Rechazar archivos muy grandes)
+      const validation =
+        await VucemProcessor.validateBeforeProcessing(uploadedFilePath);
+
+      if (!validation.valid) {
+        // Limpiar archivo antes de rechazar
+        if (fs.existsSync(uploadedFilePath)) {
+          fs.unlinkSync(uploadedFilePath);
+        }
+        return res.status(400).json({
+          error: validation.warnings.join(", "),
+          suggestion:
+            "Reduce el tamaño del archivo original antes de procesarlo. Puedes usar herramientas online o comprimir las imágenes dentro del PDF.",
+        });
+      }
+
+      if (validation.warnings.length > 0) {
+        console.warn("⚠️ Advertencias:", validation.warnings);
+      }
+
+      // ✅ LLAMAR AL PROCESADOR HÍBRIDO
+      console.log("🔄 Iniciando procesamiento VUCEM...");
       const vucemPath = await VucemProcessor.process(
         uploadedFilePath,
         req.file.mimetype,
-        "manual"
+        "manual",
       );
 
+      // Limpiar archivo temporal original
       try {
         if (fs.existsSync(uploadedFilePath)) {
           fs.unlinkSync(uploadedFilePath);
@@ -114,59 +144,111 @@ app.post(
       } catch (cleanupError) {
         console.error("Error limpiando temporal:", cleanupError);
       }
-      // 3. Responder Éxito
+
+      // Obtener tamaño final
+      const finalSize = fs.statSync(vucemPath).size;
+      console.log(
+        `✅ Procesamiento completado. Tamaño final: ${(finalSize / 1024 / 1024).toFixed(2)} MB`,
+      );
+
       res.json({
-        message: "Archivo procesado correctamente",
+        message: "Archivo procesado correctamente según estándares VUCEM",
         path: vucemPath,
+        originalSize: req.file.size,
+        finalSize: finalSize,
+        compressionRatio:
+          ((1 - finalSize / req.file.size) * 100).toFixed(1) + "%",
       });
-    } catch (error: any) {
-      console.error("Error en upload:", error);
+    } catch (error: unknown) {
+      console.error("❌ Error en upload:", error);
+
+      // Limpiar archivo temporal en caso de error
       if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
         try {
           fs.unlinkSync(uploadedFilePath);
-        } catch (e) {}
+        } catch (e) {
+          console.error("Error limpiando temporal tras fallo:", e);
+        }
       }
-      res.status(500).json({ error: error.message });
+
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+
+      res.status(500).json({
+        error: errorMessage,
+        details: "El archivo no pudo ser procesado según los requisitos VUCEM",
+      });
     }
-  }
+  },
 );
 
-// RUTA PARA ELIMINAR DOCUMENTO
+// RUTA: ELIMINAR DOCUMENTO
 app.delete("/api/documents/:id", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    // 1. Buscar el documento en BD para saber el nombre del archivo
+    // Buscar el documento en BD
     const doc = await DocumentModel.findById(id);
     if (!doc) {
       return res.status(404).json({ error: "Documento no encontrado" });
     }
 
-    // 2. Eliminar el archivo físico de la carpeta vucem_ready
+    // Eliminar archivo físico de vucem_ready
     const filePath = path.join(
       __dirname,
       "../uploads/vucem_ready",
-      doc.storedName
+      doc.storedName,
     );
+
     if (fs.existsSync(filePath)) {
       try {
         fs.unlinkSync(filePath);
         console.log(`🗑️ Archivo físico eliminado: ${doc.storedName}`);
-      } catch (err) {
-        console.error("Error borrando archivo físico:", err);
+      } catch (err: unknown) {
+        const error = err instanceof Error ? err.message : String(err);
+        console.error("Error borrando archivo físico:", error);
       }
     }
 
-    // 3. Eliminar el registro de MongoDB
+    // Eliminar registro de MongoDB
     await DocumentModel.findByIdAndDelete(id);
 
     res.json({ message: "Documento eliminado correctamente" });
-  } catch (error) {
-    console.error("Error al eliminar:", error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("Error al eliminar:", message);
     res.status(500).json({ error: "Error interno al eliminar" });
+  }
+});
+
+// RUTA: VERIFICAR ESTADO DE GHOSTSCRIPT (útil para debugging)
+app.get("/api/system/ghostscript", async (_req: Request, res: Response) => {
+  try {
+    // En Windows usa gswin64c, en Unix/Mac usa gs
+    const isWindows = process.platform === "win32";
+    const gsCommand = isWindows ? "gswin64c --version" : "gs --version";
+
+    const { stdout } = await execAsync(gsCommand);
+    res.json({
+      available: true,
+      version: stdout.trim(),
+      command: isWindows ? "gswin64c" : "gs",
+      message: "Ghostscript está instalado y disponible",
+    });
+  } catch (error) {
+    res.json({
+      available: false,
+      message: "Ghostscript NO está instalado o no está en el PATH.",
+      install:
+        "Windows: Asegúrate de agregar C:\\Program Files\\gs\\gs10.06.0\\bin al PATH y reinicia VSCode | Ubuntu/Debian: sudo apt-get install ghostscript | macOS: brew install ghostscript",
+    });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`✅ Backend running on http://localhost:${PORT}`);
+  console.log(`📁 Upload directory: ${uploadDir}`);
+  console.log(
+    `📄 Documentos procesados en: ${path.join(uploadDir, "vucem_ready")}`,
+  );
 });

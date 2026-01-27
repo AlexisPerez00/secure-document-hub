@@ -1,8 +1,7 @@
 import nodemailer from "nodemailer";
 
-// Configuración del transporte
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com", // ✅ Fallback a Gmail
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
   port: 465,
   secure: true,
   auth: {
@@ -21,6 +20,7 @@ export class NotificationService {
       const hasSuccess = successFiles.length > 0;
       const hasErrors = errors.length > 0;
 
+      // Construir asunto
       let subject = "";
       if (hasSuccess && !hasErrors)
         subject = "✅ Documentos procesados con éxito";
@@ -28,33 +28,62 @@ export class NotificationService {
         subject = "⚠️ Procesamiento parcial (algunos archivos fallaron)";
       else subject = "❌ Error procesando tus documentos";
 
-      let htmlBody = `<h3>Resumen de procesamiento</h3>`;
+      // Construir cuerpo HTML
+      let htmlBody = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #333;">📋 Resumen de procesamiento</h2>
+      `;
 
       if (hasSuccess) {
-        htmlBody += `<p><b>✅ Archivos listos (${successFiles.length}):</b></p><ul>`;
+        htmlBody += `
+          <div style="background-color: #d4edda; border: 1px solid #c3e6cb; padding: 15px; border-radius: 5px; margin: 10px 0;">
+            <h3 style="color: #155724; margin-top: 0;">✅ Archivos procesados (${successFiles.length})</h3>
+            <ul style="color: #155724;">
+        `;
         successFiles.forEach((f) => {
-          htmlBody += `<li>${f.name}</li>`;
+          htmlBody += `<li><strong>${f.name}</strong></li>`;
         });
-        htmlBody += `</ul>`;
+        htmlBody += `
+            </ul>
+            <p style="color: #155724; margin-bottom: 0;">Los archivos adjuntos están listos en formato VUCEM.</p>
+          </div>
+        `;
       }
 
       if (hasErrors) {
-        htmlBody += `<p style="color:red;"><b>❌ Errores (${errors.length}):</b></p><ul>`;
+        htmlBody += `
+          <div style="background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 15px; border-radius: 5px; margin: 10px 0;">
+            <h3 style="color: #721c24; margin-top: 0;">❌ Archivos con errores (${errors.length})</h3>
+            <ul style="color: #721c24;">
+        `;
         errors.forEach((e) => {
-          htmlBody += `<li><b>${e.name}:</b> ${e.error}</li>`;
+          htmlBody += `<li><strong>${e.name}:</strong> ${e.error}</li>`;
         });
-        htmlBody += `</ul><p>Por favor verifica que los archivos con error no estén dañados o protegidos con contraseña.</p>`;
+        htmlBody += `
+            </ul>
+            <p style="color: #721c24; margin-bottom: 0;">Por favor verifica que los archivos no estén dañados o protegidos con contraseña.</p>
+          </div>
+        `;
       }
 
-      htmlBody += `<br><small>Secure Document Hub Bot</small>`;
+      htmlBody += `
+          <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
+          <p style="color: #666; font-size: 12px; text-align: center;">
+            Secure Document Hub Bot<br>
+            Sistema automático de procesamiento VUCEM
+          </p>
+        </div>
+      `;
 
+      // Preparar adjuntos
       const attachments = successFiles.map((f) => ({
         filename: f.name,
         path: f.path,
       }));
 
+      // Enviar correo
       await transporter.sendMail({
-        from: `"Secure Hub Bot" <${process.env.IMAP_USER}>`,
+        from: `"Secure Hub Bot 🤖" <${process.env.IMAP_USER}>`,
         to: to,
         subject: subject,
         html: htmlBody,
@@ -64,6 +93,7 @@ export class NotificationService {
       console.log(`📧 Reporte consolidado enviado a ${to}`);
     } catch (error) {
       console.error("❌ Error fatal enviando reporte consolidado:", error);
+      throw error; // Re-lanzar para que emailService.ts lo maneje
     }
   }
 }
